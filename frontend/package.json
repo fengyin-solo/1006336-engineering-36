@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "verify": "esbuild scripts/verify-data.ts scripts/verify-transaction.ts scripts/verify-bootstrap.ts --bundle --platform=node --format=esm --alias:@=./src --outdir=node_modules/.verify --log-level=warning && node node_modules/.verify/verify-data.js && node node_modules/.verify/verify-transaction.js && node node_modules/.verify/verify-bootstrap.js"
   },
   "dependencies": {
     "pinia": "^2.1.7",

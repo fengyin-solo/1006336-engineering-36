@@ -1,5 +1,17 @@
 import { MODULE_BY_KEY } from '@/data/modules'
-import { allRows, listRows, resetRows, saveRows } from '@/data/local-store'
+import { allRows, listRows, resetAll, resetRows, saveRows } from '@/data/local-store'
+import {
+  auditDutyRows,
+  handedOverCount,
+  legacyLeftCount,
+  pendingHandoverCount,
+  ISSUE_LABELS,
+} from '@/data/duty-rules'
+import {
+  confirmHandover,
+  registerLegacy,
+  startHandover,
+} from '@/api/duty-service'
 import type { ActionResult, EntryRow, ModuleMeta, OverviewResult, PageResult } from '@/data/types'
 
 // 会写进数据的「往回走」动作：命中就把这条记录标成异常态，看板上能一眼看出来。
@@ -28,7 +40,33 @@ export function listEntries(key: string, filters: Record<string, string> = {}): 
   return { items: matched, total: matched.length, page: 1, size: matched.length }
 }
 
-export function runAction(key: string, id: number, action: string): ActionResult {
+/**
+ * 动作流转：值班交接（duty）的三个动作走领域服务（同一套读写规则、状态机与事务）；
+ * 其余模块沿用通用状态机。页面不做业务判断。
+ */
+export function runAction(key: string, id: number, action: string, payload?: unknown): ActionResult {
+  if (key === 'duty') {
+    if (action === '发起交接') {
+      return startHandover(id)
+    }
+    if (action === '确认交接') {
+      const person =
+        payload && typeof payload === 'object' && 'handoverPerson' in payload
+          ? String((payload as { handoverPerson: unknown }).handoverPerson ?? '')
+          : ''
+      return confirmHandover(id, person)
+    }
+    if (action === '登记遗留') {
+      const input = (payload ?? {}) as { items?: string; measuredDate?: string; deviceNo?: string }
+      return registerLegacy(id, {
+        items: String(input.items ?? ''),
+        measuredDate: String(input.measuredDate ?? ''),
+        deviceNo: String(input.deviceNo ?? ''),
+      })
+    }
+    return { ok: false, message: `值班交接没有登记「${action}」这个动作` }
+  }
+
   const meta = moduleMeta(key)
   const target = meta.actionTargets[action]
   if (!target) {
@@ -61,6 +99,10 @@ export function resetModule(key: string): PageResult {
   return listEntries(key)
 }
 
+export function resetAllModules(): void {
+  resetAll()
+}
+
 export function exportEntries(key: string): { filename: string; content: string } {
   const meta = moduleMeta(key)
   const header = ['编号', ...meta.fields, '当前状态']
@@ -71,8 +113,25 @@ export function exportEntries(key: string): { filename: string; content: string 
   return { filename: `${meta.name}-清单.csv`, content: `\uFEFF${lines.join('\n')}` }
 }
 
-export function downloadEntries(key: string): void {
-  const { filename, content } = exportEntries(key)
+/** 核对清单导出：条目与页面「交接核对」表逐条一致（同一数据源、同一顺序）。 */
+export function exportDutyAudit(): { filename: string; content: string } {
+  const issues = auditDutyRows(listRows('duty'))
+  const lines = ['记录ID,交接编号,值班日期,值班班组,问题类型,缘由']
+  for (const issue of issues) {
+    const cells = [
+      issue.rowId,
+      issue.code,
+      issue.date,
+      issue.team,
+      ISSUE_LABELS[issue.type],
+      issue.reason,
+    ].map((cell) => `"${String(cell).replace(/"/g, '""')}"`)
+    lines.push(cells.join(','))
+  }
+  return { filename: '运维值班交接-核对清单.csv', content: `\uFEFF${lines.join('\n')}` }
+}
+
+export function downloadText(filename: string, content: string): void {
   const blob = new Blob([content], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
@@ -82,6 +141,32 @@ export function downloadEntries(key: string): void {
   anchor.click()
   document.body.removeChild(anchor)
   URL.revokeObjectURL(url)
+}
+
+export function downloadEntries(key: string): void {
+  const { filename, content } = exportEntries(key)
+  downloadText(filename, content)
+}
+
+export function downloadDutyAudit(): void {
+  const { filename, content } = exportDutyAudit()
+  downloadText(filename, content)
+}
+
+/**
+ * 模块指标：统一口径。值班交接的三张卡片与页面、导出、核对都来自同一批行、同一组谓词；
+ * 其余模块沿用 pending/abnormal 标记。概览、页面统计、CSV 报表读数因此处处一致。
+ */
+export function moduleMetricValues(key: string): Record<string, number> {
+  if (key === 'duty') {
+    const rows = listRows('duty')
+    return {
+      待交接班次: pendingHandoverCount(rows),
+      已交接班次: handedOverCount(rows),
+      有遗留事项: legacyLeftCount(rows),
+    }
+  }
+  return {}
 }
 
 export function loadOverview(): OverviewResult {
