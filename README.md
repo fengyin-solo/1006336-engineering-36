@@ -3,7 +3,7 @@
 面向管廊主体台账、入廊管线登记、廊内环境监测、通风排水消防、结构沉降与渗漏处置、巡检检修与隐患整改、入廊作业审批和运维值班的一体化城市地下综合管廊运行维护管理工作台。
 
 这是一个**纯前端**管理平台：Vue 3 + Vite + TypeScript，仓库里没有后端服务。业务数据由
-`frontend/src/data/` 下的本地数据层提供：首次打开用示例数据播种，之后的登记、筛选与状态流转
+`frontend/src/data/` 下的本地数据层提供：首次打开用种子数据播种，之后的登记、筛选与状态流转
 结果都持久化在浏览器 `localStorage` 里，刷新或重开浏览器都还在。dev server 已关掉自动打开页面，
 启动后按终端打印的地址手工打开。
 
@@ -13,30 +13,62 @@
 .
 ├── frontend/                 Vue 3 + Vite + TypeScript 前端（唯一运行单元）
 │   ├── src/views/            每个业务模块一个页面
-│   ├── src/api/local-service.ts   本地数据服务：列表、筛选、动作流转、导出
-│   ├── src/data/             模块元数据 / 示例数据 / localStorage 持久化
+│   ├── src/api/local-service.ts   本地数据服务：列表、筛选、动作流转、导出、指标、核对
+│   ├── src/data/             模块元数据 / 种子数据 / 持久化 / 迁移
+│   │   ├── seed-measured.ts   现场实测口径的权威种子（开发与线上同一份）
+│   │   ├── duty-domain.ts     值班交接唯一读写规则（纯函数，可在 Node 中验证）
+│   │   └── migrations.ts      本地库版本化迁移（v1 裸记录 → v2 带版本号）
 │   ├── src/stores/           会话与筛选状态
+│   ├── scripts/verify-data-layer.ts  数据层验证脚本（npm run verify）
 │   └── vite.config.ts        dev server 配置（open: false，无 /api 代理）
-├── .gitignore
-└── docker-compose.yml
+├── docker-compose.yml        生产部署：静态镜像（nginx）
+└── Makefile
 ```
 
 ## 启动
 
 ```bash
 cd frontend
-npm install
+npm ci          # 或 npm install；CI/线上用 npm ci 按 package-lock.json 锁定安装
 npm run dev
 ```
 
 前端默认监听 `http://127.0.0.1:5173/`，dev server 不会自动打开浏览器，需要自己访问。
 
-生产构建：
+数据层验证（动作流转、存量核对、迁移幂等、落库回退等 50+ 断言）：
 
 ```bash
-cd frontend
-npm run build
+npm run verify
 ```
+
+生产构建（先类型检查再打包）与容器部署：
+
+```bash
+npm run build         # 本地
+make image && make up # Docker：verify → build → nginx 静态镜像，端口 8080
+```
+
+## 运维值班交接数据层约定
+
+- **同一套读写规则**：发起交接 / 确认交接 / 登记遗留只走 `duty-domain.ts` 的纯函数，
+  页面与 `local-service.ts` 不做业务判断。班次取值限定「白班 / 夜班」，值班班组按现场花名册
+  轮转（以 `2026-10-01` 一班白班为基准），交接人员必须属于当班班组。
+- **可搬走的种子**：交接样例按「交接编号 + 班次」确定性生成
+  （`DUTY-YYYYMMDD-1` 白班 / `-2` 夜班），开发与线上读的是同一份 `seed-measured.ts`，
+  换机器不会变号、不会串班次。
+- **幂等初始化**：localStorage 带版本号 `{version, entries}`，首次读取时把 v1 裸记录迁移到 v2；
+  迁移按版本号驱动、整包原子落盘，重复执行结果一致，不会冒出多余班次。
+- **存量迁移规则**：值班交接按值班日期迁移并排序；早年没有班次登记的，同一日期内已登记班次
+  先占位，缺班次记录按登记顺序补第一个空位（先白班后夜班，来源标注「补录（按值班日期）」），
+  同日无空位或日期缺失则**留空交核对清单列出，不拿默认值顶**。渗漏处置按发现日期倒排补录。
+  交接编号与实测撞车时**以现场实测那份为准**，其余派生字段按规则重算。
+- **覆盖还是另存**：选**另存**。老快照保留到写入成功为止，新库先在内存整体序列化，再一次性
+  `setItem`；落库失败（如配额满）整套退回，不留半截字段。版本升级同理。
+- **遗留事项与保养台账对齐**：「登记遗留」在同一事务里写 `duty` 与 `maintenance`，
+  保养台账用「来源交接编号」回指交接记录，同编号只维护一条；重复登记更新、不重复建账。
+- **核对与报表**：值班页面底部列出「交接编号撞车 / 班次空着 / 交接人员与值班班组对不上」
+  （另附排班不符提示）逐条缘由；核对跑在页面同一份筛选结果上，核对条数与页面条数一致。
+  指标卡、状态图例、CSV 导出、运营概览全部从同一份规范化数据读数。
 
 ## 业务模块
 
@@ -53,19 +85,20 @@ npm run build
 | 廊内巡检任务 | `patrol` | 巡检任务 | 巡检编号、巡检路线、巡检班组 |
 | 结构沉降监测 | `settlement` | 沉降监测点 | 监测编号、监测断面、累计沉降量 |
 | 渗漏水处置 | `leak` | 渗漏处置单 | 处置编号、渗漏点位、渗漏程度 |
-| 设施检修管理 | `maintenance` | 检修记录 | 检修编号、检修对象、检修类别 |
+| 设施检修管理 | `maintenance` | 检修记录 | 检修编号、检修对象、来源交接编号 |
 | 隐患整改管理 | `hazard` | 隐患记录 | 隐患编号、隐患部位、隐患等级 |
 | 应急演练管理 | `emergency` | 应急演练 | 演练编号、演练场景、参与班组 |
 | 廊内能耗计量 | `energy` | 能耗计量记录 | 计量编号、计量点位、用电量 |
 | 设备台账管理 | `device` | 管廊设备 | 设备编号、设备名称、设备型号 |
 | 入廊作业审批 | `entryapprove` | 作业申请 | 申请编号、申请单位、作业舱室 |
-| 运维值班交接 | `duty` | 值班交接记录 | 交接编号、值班班组、值班日期 |
+| 运维值班交接 | `duty` | 值班交接记录 | 交接编号、值班班组、班次、遗留事项 |
 
 ## 约定
 
 - 每个模块的页面在 `frontend/src/views/<模块>/index.vue`，页面只负责渲染，读写统一走
   `frontend/src/api/local-service.ts`。
-- 字段、状态、动作与流转目标集中在 `frontend/src/data/modules.ts`；示例数据在
-  `frontend/src/data/seed.ts`。
-- 状态流转只允许在 `local-service.ts` 里改，页面组件不做业务判断。
-- 想回到初始数据：清掉浏览器里 `urban-utility-tunnel:entries` 这一项，或调用 `resetModule(模块)`。
+- 字段、状态、动作与流转目标集中在 `frontend/src/data/modules.ts`；实测种子在
+  `frontend/src/data/seed-measured.ts`，领域规则在 `frontend/src/data/duty-domain.ts`。
+- 状态流转只允许在服务层 / 领域规则里改，页面组件不做业务判断。
+- 想回到初始数据：清掉浏览器里 `urban-utility-tunnel:entries` 这一项，调用
+  `resetModule(模块)`，或值班页面的「恢复现场实测种子」。

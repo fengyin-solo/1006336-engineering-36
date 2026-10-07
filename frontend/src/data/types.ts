@@ -36,3 +36,14 @@ export type OverviewResult = {
   cards: { label: string; value: number }[]
   modules: { name: string; created: number; pending: number; abnormal: number }[]
 }
+
+/** 存量核对项：一条记录可命中多条缘由，页面逐条列出。 */
+export type AuditLike = {
+  id: number | ''
+  code: string
+  dutyDate: string
+  shift: string
+  team: string
+  handoverPerson: string
+  reasons: string[]
+}

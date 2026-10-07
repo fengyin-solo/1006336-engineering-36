@@ -3,11 +3,11 @@
     <header class="page-head">
       <div>
         <h2>运维值班交接管理</h2>
-        <p class="page-desc">维护值班交接记录，围绕交接编号、值班班组、值班日期、班次做登记、筛选与状态流转。</p>
+        <p class="page-desc">发起交接、确认交接、登记遗留走同一套读写规则；遗留事项同步登记到保养台账，来源交接编号两边对齐。</p>
       </div>
       <div class="page-actions">
-        <button class="btn primary" type="button" @click="openCreate">登记值班交接记录</button>
         <button class="btn" type="button" @click="exportRows">导出运维值班交接清单</button>
+        <button class="btn ghost" type="button" @click="resetData">恢复现场实测种子</button>
       </div>
     </header>
 
@@ -47,21 +47,80 @@
           <td>{{ row.status }}</td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
-              :key="action"
+              v-if="canRun('发起交接', row)"
               class="link"
               type="button"
-              @click="runAction(action, row)"
+              @click="runAction('发起交接', row)"
             >
-              {{ action }}
+              发起交接
             </button>
+            <button
+              v-if="canRun('确认交接', row)"
+              class="link"
+              type="button"
+              @click="runAction('确认交接', row)"
+            >
+              确认交接
+            </button>
+            <button
+              v-if="canRun('登记遗留', row)"
+              class="link"
+              type="button"
+              @click="openLegacy(row)"
+            >
+              登记遗留
+            </button>
+            <span v-if="!availableActions(row).length" class="muted">—</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 2" class="empty-state">暂无运维值班交接数据，可先登记值班交接记录</td>
+          <td :colspan="columns.length + 2" class="empty-state">暂无符合条件的值班交接记录</td>
         </tr>
       </tbody>
     </table>
+
+    <section v-if="legacyTarget" class="legacy-panel" @submit.prevent="submitLegacy">
+      <h3>登记遗留 · {{ legacyTarget['交接编号'] }}（{{ legacyTarget['值班日期'] }} {{ legacyTarget['班次'] }}）</h3>
+      <p class="muted">遗留事项会同步登记到设施检修保养台账，来源交接编号：{{ legacyTarget['交接编号'] }}</p>
+      <label class="filter-item">
+        <span>交接人员</span>
+        <input v-model="legacyForm.handoverPerson" placeholder="现场交班人姓名（必须属于当班班组）" />
+      </label>
+      <label class="filter-item">
+        <span>遗留事项</span>
+        <textarea v-model="legacyForm.legacyNote" rows="3" placeholder="现场遗留情况，缺值不拿默认值顶"></textarea>
+      </label>
+      <div class="page-actions">
+        <button class="btn primary" type="submit">提交登记（同事务写保养台账）</button>
+        <button class="btn ghost" type="button" @click="closeLegacy">取消</button>
+      </div>
+    </section>
+
+    <section class="audit-panel">
+      <header class="audit-head">
+        <h3>存量核对</h3>
+        <span>页面 {{ rows.length }} 条，核对有问题 {{ auditItems.length }} 条</span>
+      </header>
+      <table v-if="auditItems.length" class="data-table">
+        <thead>
+          <tr>
+            <th>行号</th><th>交接编号</th><th>值班日期</th><th>班次</th><th>值班班组</th><th>交接人员</th><th>缘由</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in auditItems" :key="`${item.id}-${item.code}`">
+            <td>{{ item.id }}</td>
+            <td>{{ item.code }}</td>
+            <td>{{ item.dutyDate || '—' }}</td>
+            <td>{{ item.shift }}</td>
+            <td>{{ item.team }}</td>
+            <td>{{ item.handoverPerson }}</td>
+            <td>{{ item.reasons.join('；') }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">交接编号无撞车、班次无空缺、交接人员与值班班组全部对得上。</p>
+    </section>
 
     <footer class="page-foot">
       <span>共 {{ total }} 条运维值班交接记录</span>
@@ -74,24 +133,28 @@
 import { computed, onMounted, ref } from 'vue'
 
 import {
+  auditEntries,
   downloadEntries,
   listEntries,
   moduleMeta,
+  moduleStats,
+  resetModule,
   runAction as applyAction,
 } from '@/api/local-service'
-import type { EntryRow } from '@/data/types'
+import type { AuditLike, EntryRow } from '@/data/types'
 
 const meta = moduleMeta('duty')
-const columns = ["交接编号", "值班班组", "值班日期", "班次", "值班人员", "交接事项", "交接人员", "交接状态"]
-const actions = ["发起交接", "确认交接", "登记遗留"]
+const columns = meta.fields
 const statuses = ["待交接", "交接中", "已交接", "有遗留"]
-const stats = [{"label": "待交接班次", "value": 0}, {"label": "已交接班次", "value": 0}, {"label": "有遗留事项", "value": 0}]
 
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
+const stats = ref<{ label: string; value: number }[]>([])
+const auditItems = ref<AuditLike[]>([])
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const filterFields = ["交接编号", "值班班组", "值班日期"]
+
 const statusSummary = computed(() =>
   statuses.map((status: string) => ({
     status,
@@ -99,17 +162,39 @@ const statusSummary = computed(() =>
   })),
 )
 
+const legacyTarget = ref<EntryRow | null>(null)
+const legacyForm = ref({ handoverPerson: '', legacyNote: '' })
+
+function availableActions(row: EntryRow): string[] {
+  const status = String(row.status)
+  if (status === '待交接') {
+    return ['发起交接']
+  }
+  if (status === '交接中') {
+    return ['确认交接', '登记遗留']
+  }
+  if (status === '已交接') {
+    return ['登记遗留']
+  }
+  return []
+}
+
+function canRun(action: string, row: EntryRow): boolean {
+  return availableActions(row).includes(action)
+}
+
 function resetFilters() {
   filters.value = {}
   reload()
 }
 
 function exportRows() {
-  downloadEntries(meta.key)
+  downloadEntries(meta.key, filters.value)
 }
 
-function openCreate() {
-  errorMessage.value = '值班交接记录登记入口尚未接入审批流'
+function resetData() {
+  resetModule(meta.key)
+  reload()
 }
 
 function runAction(action: string, row: EntryRow) {
@@ -122,12 +207,44 @@ function runAction(action: string, row: EntryRow) {
   reload()
 }
 
+function openLegacy(row: EntryRow) {
+  errorMessage.value = ''
+  legacyTarget.value = row
+  legacyForm.value = {
+    handoverPerson: String(row['交接人员'] ?? ''),
+    legacyNote: String(row['遗留事项'] ?? ''),
+  }
+}
+
+function closeLegacy() {
+  legacyTarget.value = null
+}
+
+function submitLegacy() {
+  if (!legacyTarget.value) {
+    return
+  }
+  const result = applyAction(meta.key, Number(legacyTarget.value.id), '登记遗留', {
+    legacyNote: legacyForm.value.legacyNote,
+    handoverPerson: legacyForm.value.handoverPerson,
+  })
+  if (!result.ok) {
+    errorMessage.value = result.message
+    return
+  }
+  closeLegacy()
+  reload()
+}
+
 function reload() {
   errorMessage.value = ''
   try {
     const payload = listEntries(meta.key, filters.value)
     rows.value = payload.items
     total.value = payload.total
+    // 指标卡与核对清单都从页面同一份筛选结果读数。
+    stats.value = moduleStats(meta.key, filters.value)
+    auditItems.value = auditEntries(meta.key, filters.value)
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '运维值班交接列表读取失败'
   }
@@ -135,3 +252,29 @@ function reload() {
 
 onMounted(reload)
 </script>
+
+<style scoped>
+.audit-panel {
+  margin-top: 16px;
+  border-top: 1px solid #d8dee8;
+  padding-top: 12px;
+}
+.audit-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.legacy-panel {
+  margin-top: 12px;
+  border: 1px solid #c9a227;
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: #fffaf0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.muted {
+  color: #7a869a;
+}
+</style>
